@@ -1,25 +1,17 @@
 #ifdef BUILD_WITH_PCL
 
 #include <small_gicp/benchmark/benchmark_odom.hpp>
-
-#include <pcl/point_types.h>
-#include <pcl/point_cloud.h>
-
-#include <small_gicp/pcl/pcl_registration.hpp>
-#include <small_gicp/pcl/pcl_registration_impl.hpp>
+#include <small_gicp/pcl/pcl.hpp>
 
 namespace small_gicp {
 
 class SmallGICPPCLOdometryEstimation : public OnlineOdometryEstimation {
 public:
-  explicit SmallGICPPCLOdometryEstimation(const OdometryEstimationParams& params) : OnlineOdometryEstimation(params), T(Eigen::Isometry3d::Identity()) {
-    gicp.setCorrespondenceRandomness(params.num_neighbors);
-    gicp.setMaxCorrespondenceDistance(params.max_correspondence_distance);
-    gicp.setNumThreads(params.num_threads);
-  }
+  explicit SmallGICPPCLOdometryEstimation(const OdometryEstimationParams& params) : OnlineOdometryEstimation(params), T(Eigen::Isometry3d::Identity()) {}
 
   Eigen::Isometry3d estimate(const PointCloud::Ptr& points) override {
-    auto points_pcl = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    // Feed PCL point clouds to the native registration through the traits specialization
+    auto points_pcl = std::make_shared<pcl::PointCloud<pcl::PointCovariance>>();
     points_pcl->resize(points->size());
     for (size_t i = 0; i < points->size(); i++) {
       points_pcl->at(i).getVector4fMap() = points->point(i).template cast<float>();
@@ -28,20 +20,31 @@ public:
     Stopwatch sw;
     sw.start();
 
-    if (!gicp.getInputTarget()) {
-      gicp.setInputTarget(points_pcl);
+    // Preprocess input points (kdtree construction & covariance estimation)
+    // Note that input points here is already downsampled
+    auto tree = std::make_shared<KdTree<pcl::PointCloud<pcl::PointCovariance>>>(points_pcl, KdTreeBuilderOMP(params.num_threads));
+    estimate_covariances_omp(*points_pcl, *tree, params.num_neighbors, params.num_threads);
+
+    if (target_points == nullptr) {
+      // This is the very first frame
+      target_points = points_pcl;
+      target_tree = tree;
       return T;
     }
 
-    gicp.setInputSource(points_pcl);
-    pcl::PointCloud<pcl::PointXYZ> aligned;
-    gicp.align(aligned);
+    // Registration using GICP + OMP-based parallel reduction
+    Registration<GICPFactor, ParallelReductionOMP> registration;
+    registration.rejector.max_dist_sq = params.max_correspondence_distance * params.max_correspondence_distance;
+    registration.reduction.num_threads = params.num_threads;
+
+    const auto result = registration.align(*target_points, *points_pcl, *target_tree, Eigen::Isometry3d::Identity());
 
     sw.stop();
     reg_times.push(sw.msec());
 
-    T = T * Eigen::Isometry3d(gicp.getFinalTransformation().cast<double>());
-    gicp.swapSourceAndTarget();
+    T = T * result.T_target_source;
+    target_points = points_pcl;
+    target_tree = tree;
 
     return T;
   }
@@ -53,7 +56,9 @@ public:
 private:
   Summarizer reg_times;
 
-  small_gicp::RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> gicp;
+  std::shared_ptr<pcl::PointCloud<pcl::PointCovariance>> target_points;             // Last point cloud to be registration target
+  std::shared_ptr<KdTree<pcl::PointCloud<pcl::PointCovariance>>> target_tree;       // KdTree of the last target points
+
   Eigen::Isometry3d T;
 };
 

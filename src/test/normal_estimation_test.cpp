@@ -47,8 +47,10 @@ public:
       EXPECT_NEAR(normal.w(), 0.0, 1e-6) << "Last element must be zero";
       EXPECT_NEAR(normal.norm(), 1.0, 1e-6) << "Normal must be unit vector";
 
+      // PCL computes the neighborhood covariance in float without shifting the points, so its normals deviate
+      // from the double-precision reference on ill-conditioned neighborhoods (PCL < 1.11 shifts the points).
       const double error = (normal - points_pcl->at(i).getNormalVector4fMap().cast<double>()).norm();
-      EXPECT_NEAR(error, 0.0, 1e-3) << "Normal estimation error is too large";
+      EXPECT_NEAR(error, 0.0, 3e-2) << "Normal estimation error is too large";
     }
     return true;
   }
@@ -104,7 +106,7 @@ TEST_F(NormalEstimationTest, EmptyTest) {
   EXPECT_TRUE(empty_points->empty());
 
   // Empty point cloud (PCL)
-  auto empty_points_pcl = pcl::make_shared<pcl::PointCloud<pcl::PointNormalCovariance>>();
+  auto empty_points_pcl = std::make_shared<pcl::PointCloud<pcl::PointNormalCovariance>>();
   auto empty_tree_pcl = std::make_shared<KdTree<pcl::PointCloud<pcl::PointNormalCovariance>>>(empty_points_pcl);
 
   estimate_normals(*empty_points_pcl, *empty_tree_pcl, num_neighbors);
@@ -129,7 +131,7 @@ TEST_F(NormalEstimationTest, EmptyTestTBB) {
   EXPECT_TRUE(empty_points->empty());
 
   // Empty point cloud (PCL)
-  auto empty_points_pcl = pcl::make_shared<pcl::PointCloud<pcl::PointNormalCovariance>>();
+  auto empty_points_pcl = std::make_shared<pcl::PointCloud<pcl::PointNormalCovariance>>();
   auto empty_tree_pcl = std::make_shared<KdTree<pcl::PointCloud<pcl::PointNormalCovariance>>>(empty_points_pcl);
 
   estimate_normals_tbb(*empty_points_pcl, *empty_tree_pcl, num_neighbors);
@@ -154,7 +156,7 @@ TEST_F(NormalEstimationTest, EmptyTestOMP) {
   EXPECT_TRUE(empty_points->empty());
 
   // Empty point cloud (PCL)
-  auto empty_points_pcl = pcl::make_shared<pcl::PointCloud<pcl::PointNormalCovariance>>();
+  auto empty_points_pcl = std::make_shared<pcl::PointCloud<pcl::PointNormalCovariance>>();
   auto empty_tree_pcl = std::make_shared<KdTree<pcl::PointCloud<pcl::PointNormalCovariance>>>(empty_points_pcl);
 
   estimate_normals_omp(*empty_points_pcl, *empty_tree_pcl, num_neighbors, 2);

@@ -65,8 +65,8 @@ align(const std::vector<Eigen::Matrix<T, D, 1>>& target, const std::vector<Eigen
     return RegistrationResult(Eigen::Isometry3d::Identity());
   }
 
-  auto [target_points, target_tree] = preprocess_points(*std::make_shared<PointCloud>(target), setting.downsampling_resolution, 10, setting.num_threads);
-  auto [source_points, source_tree] = preprocess_points(*std::make_shared<PointCloud>(source), setting.downsampling_resolution, 10, setting.num_threads);
+  auto [target_points, target_tree] = preprocess_points(*std::make_shared<PointCloud>(target), setting.downsampling_resolution, setting.num_neighbors, setting.num_threads);
+  auto [source_points, source_tree] = preprocess_points(*std::make_shared<PointCloud>(source), setting.downsampling_resolution, setting.num_neighbors, setting.num_threads);
 
   if (setting.type == RegistrationSetting::VGICP) {
     auto target_voxelmap = create_gaussian_voxelmap(*target_points, setting.voxel_resolution);

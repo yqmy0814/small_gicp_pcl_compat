@@ -2,52 +2,38 @@
 // SPDX-License-Identifier: MIT
 
 /// @brief Basic point cloud registration example with PCL interfaces
-#include <small_gicp/pcl/pcl_point.hpp>
-#include <small_gicp/pcl/pcl_point_traits.hpp>
-#include <small_gicp/pcl/pcl_registration.hpp>
-#include <small_gicp/util/downsampling_omp.hpp>
+#include <small_gicp/pcl/pcl.hpp>
 #include <small_gicp/benchmark/read_points.hpp>
 
 using namespace small_gicp;
 
-/// @brief Example of using RegistrationPCL that can be used as a drop-in replacement for pcl::GeneralizedIterativeClosestPoint.
+/// @brief Example of aligning PCL point clouds with the PCL entry interface.
 void example1(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& raw_target, const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& raw_source) {
-  // small_gicp::voxelgrid_downsampling can directly operate on pcl::PointCloud.
-  pcl::PointCloud<pcl::PointXYZ>::Ptr target = voxelgrid_sampling_omp(*raw_target, 0.25);
-  pcl::PointCloud<pcl::PointXYZ>::Ptr source = voxelgrid_sampling_omp(*raw_source, 0.25);
+  // Default setting: GICP, downsampling 0.25 m, 10 neighbors, 4 threads, max correspondence distance 1.0 m
+  const auto result_gicp = align(*raw_target, *raw_source);
 
-  // RegistrationPCL is derived from pcl::Registration and has mostly the same interface as pcl::GeneralizedIterativeClosestPoint.
-  RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg;
-  reg.setNumThreads(4);
-  reg.setCorrespondenceRandomness(20);
-  reg.setMaxCorrespondenceDistance(1.0);
-  reg.setVoxelResolution(1.0);
-  reg.setRegistrationType("VGICP");  // or "GICP" (default = "GICP")
+  std::cout << "--- T_target_source ---" << std::endl << result_gicp.T_target_source.matrix() << std::endl;
 
-  // Set input point clouds.
-  reg.setInputTarget(target);
-  reg.setInputSource(source);
+  // Detailed setting: VGICP with explicit parameters
+  RegistrationSetting setting;
+  setting.type = RegistrationSetting::VGICP;
+  setting.voxel_resolution = 1.0;
+  setting.downsampling_resolution = 0.25;
+  setting.num_neighbors = 20;
+  setting.num_threads = 4;
+  setting.max_correspondence_distance = 1.0;
 
-  // Align point clouds.
-  auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-  reg.align(*aligned);
+  const auto result_vgicp = align(*raw_target, *raw_source, Eigen::Isometry3d::Identity(), setting);
 
-  std::cout << "--- T_target_source ---" << std::endl << reg.getFinalTransformation() << std::endl;
-  std::cout << "--- H ---" << std::endl << reg.getFinalHessian() << std::endl;
-
-  // Swap source and target and align again.
-  // This is useful when you want to re-use preprocessed point clouds for successive registrations (e.g., odometry estimation).
-  reg.swapSourceAndTarget();
-  reg.align(*aligned);
-
-  std::cout << "--- T_target_source ---" << std::endl << reg.getFinalTransformation().inverse() << std::endl;
+  std::cout << "--- T_target_source ---" << std::endl << result_vgicp.T_target_source.matrix() << std::endl;
+  std::cout << "--- H ---" << std::endl << result_vgicp.H << std::endl;
 }
 
 /// @brief Example to directly feed pcl::PointCloud<pcl::PointCovariance> to small_gicp::Registration.
 void example2(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& raw_target, const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& raw_source) {
   // Downsample points and convert them into pcl::PointCloud<pcl::PointCovariance>.
-  pcl::PointCloud<pcl::PointCovariance>::Ptr target = voxelgrid_sampling_omp<pcl::PointCloud<pcl::PointXYZ>, pcl::PointCloud<pcl::PointCovariance>>(*raw_target, 0.25);
-  pcl::PointCloud<pcl::PointCovariance>::Ptr source = voxelgrid_sampling_omp<pcl::PointCloud<pcl::PointXYZ>, pcl::PointCloud<pcl::PointCovariance>>(*raw_source, 0.25);
+  auto target = voxelgrid_sampling_omp<pcl::PointCloud<pcl::PointXYZ>, pcl::PointCloud<pcl::PointCovariance>>(*raw_target, 0.25);
+  auto source = voxelgrid_sampling_omp<pcl::PointCloud<pcl::PointXYZ>, pcl::PointCloud<pcl::PointCovariance>>(*raw_source, 0.25);
 
   // Estimate covariances of points.
   const int num_threads = 4;

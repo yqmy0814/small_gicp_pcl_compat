@@ -25,7 +25,7 @@ public:
     points = voxelgrid_sampling(*std::make_shared<PointCloud>(points_4f), 0.5);
     estimate_normals_covariances(*points);
 
-    points_pcl = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    points_pcl = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
     points_pcl->resize(points->size());
     for (size_t i = 0; i < points->size(); i++) {
       points_pcl->at(i).getVector4fMap() = points->point(i).cast<float>();
@@ -141,7 +141,7 @@ public:
 
 protected:
   PointCloud::Ptr points;                          ///< Input points
-  pcl::PointCloud<pcl::PointXYZ>::Ptr points_pcl;  ///< Input points (pcl)
+  std::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> points_pcl;  ///< Input points (pcl)
 
   int k;
   std::vector<Eigen::Vector4d> queries;
@@ -171,7 +171,7 @@ TEST_P(KdTreeTest, EmptyTest) {
   auto empty_points = std::make_shared<PointCloud>();
   auto kdtree = std::make_shared<UnsafeKdTree<PointCloud>>(*empty_points);
 
-  auto empty_points_pcl = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+  auto empty_points_pcl = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
   auto kdtree_pcl = std::make_shared<UnsafeKdTree<pcl::PointCloud<pcl::PointXYZ>>>(*empty_points_pcl);
 }
 

@@ -71,10 +71,18 @@ if (BUILD_WITH_PCL)
   find_package(PCL REQUIRED)
   add_compile_definitions(BUILD_WITH_PCL)
   if (NOT TARGET PCL::PCL)
+    # PCL_LIBRARIES may contain link-type keywords (optimized/debug/general, e.g. for qhull),
+    # which are not allowed in the INTERFACE_LINK_LIBRARIES property. Strip them first.
+    set(PCL_INTERFACE_LIBRARIES "")
+    foreach(lib ${PCL_LIBRARIES})
+      if (NOT lib MATCHES "^(optimized|debug|general)$")
+        list(APPEND PCL_INTERFACE_LIBRARIES ${lib})
+      endif()
+    endforeach()
     add_library(PCL::PCL INTERFACE IMPORTED)
     set_target_properties(PCL::PCL PROPERTIES
       INTERFACE_INCLUDE_DIRECTORIES "${PCL_INCLUDE_DIRS}"
-      INTERFACE_LINK_LIBRARIES "${PCL_LIBRARIES}"
+      INTERFACE_LINK_LIBRARIES "${PCL_INTERFACE_LIBRARIES}"
     )
   endif()
 endif()

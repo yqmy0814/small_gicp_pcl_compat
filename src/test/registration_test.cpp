@@ -3,10 +3,7 @@
 #include <pcl/point_cloud.h>
 #include <small_gicp/util/downsampling.hpp>
 #include <small_gicp/util/normal_estimation_omp.hpp>
-#include <small_gicp/pcl/pcl_point.hpp>
-#include <small_gicp/pcl/pcl_point_traits.hpp>
-#include <small_gicp/pcl/pcl_registration.hpp>
-#include <small_gicp/pcl/pcl_registration_impl.hpp>
+#include <small_gicp/pcl/pcl.hpp>
 #include <small_gicp/points/point_cloud.hpp>
 
 #include <small_gicp/factors/icp_factor.hpp>
@@ -176,111 +173,6 @@ TEST_F(RegistrationTest, LoadCheck) {
   EXPECT_FALSE(source_pcl->empty());
 }
 
-// PCL interface test
-TEST_F(RegistrationTest, PCLInterfaceTest) {
-  RegistrationPCL<pcl::PointNormalCovariance, pcl::PointNormalCovariance> registration;
-  registration.setNumThreads(2);
-  registration.setCorrespondenceRandomness(20);
-  registration.setRotationEpsilon(1e-4);
-  registration.setTransformationEpsilon(1e-4);
-  registration.setMaxCorrespondenceDistance(1.0);
-  registration.setRegistrationType("GICP");
-
-  // Forward align
-  registration.setInputTarget(target_pcl);
-  registration.setInputSource(source_pcl);
-
-  pcl::PointCloud<pcl::PointNormalCovariance> aligned;
-  registration.align(aligned);
-
-  EXPECT_EQ(aligned.size(), source_pcl->size());
-  EXPECT_TRUE(compare_transformation(T_target_source, Eigen::Isometry3d(registration.getFinalTransformation().cast<double>())));
-
-  // Swap and backward align
-  registration.swapSourceAndTarget();
-  registration.align(aligned);
-
-  EXPECT_EQ(aligned.size(), target_pcl->size());
-  EXPECT_TRUE(compare_transformation(T_target_source.inverse(), Eigen::Isometry3d(registration.getFinalTransformation().cast<double>())));
-
-  // Clear and forward align
-  registration.clearTarget();
-  registration.clearSource();
-
-  registration.setInputTarget(target_pcl);
-  registration.setInputSource(source_pcl);
-  registration.align(aligned);
-
-  EXPECT_EQ(aligned.size(), source_pcl->size());
-  EXPECT_TRUE(compare_transformation(T_target_source, Eigen::Isometry3d(registration.getFinalTransformation().cast<double>())));
-
-  Eigen::Matrix<double, 6, 6> H = registration.getFinalHessian();
-  Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> eig(H);
-  EXPECT_GT(eig.eigenvalues()[0], 10.0);
-  for (int i = 0; i < 6; i++) {
-    for (int j = i + 1; j < 6; j++) {
-      EXPECT_NEAR(H(i, j), H(j, i), 1e-3);
-    }
-  }
-
-  registration.setRegistrationType("VGICP");
-  registration.setVoxelResolution(1.0);
-
-  // Forward align
-  registration.setInputTarget(target_pcl);
-  registration.setInputSource(source_pcl);
-
-  registration.align(aligned);
-
-  EXPECT_EQ(aligned.size(), source_pcl->size());
-  EXPECT_TRUE(compare_transformation(T_target_source, Eigen::Isometry3d(registration.getFinalTransformation().cast<double>())));
-
-  H = registration.getFinalHessian();
-  eig.compute(H);
-  EXPECT_GT(eig.eigenvalues()[0], 10.0);
-  for (int i = 0; i < 6; i++) {
-    for (int j = i + 1; j < 6; j++) {
-      EXPECT_NEAR(H(i, j), H(j, i), 1e-3);
-    }
-  }
-
-  // Re-use covariances
-  std::vector<Eigen::Matrix4d> target_covs = registration.getTargetCovariances();
-  std::vector<Eigen::Matrix4d> source_covs = registration.getSourceCovariances();
-  EXPECT_EQ(target_covs.size(), target_pcl->size());
-  EXPECT_EQ(source_covs.size(), source_pcl->size());
-
-  registration.clearTarget();
-  registration.clearSource();
-
-  registration.setInputTarget(target_pcl);
-  registration.setTargetCovariances(target_covs);
-  registration.setInputSource(source_pcl);
-  registration.setSourceCovariances(source_covs);
-
-  registration.align(aligned);
-  EXPECT_EQ(aligned.size(), source_pcl->size());
-  EXPECT_TRUE(compare_transformation(T_target_source, Eigen::Isometry3d(registration.getFinalTransformation().cast<double>())));
-
-  // Swap and backward align
-  registration.swapSourceAndTarget();
-  registration.align(aligned);
-
-  EXPECT_EQ(aligned.size(), target_pcl->size());
-  EXPECT_TRUE(compare_transformation(T_target_source.inverse(), Eigen::Isometry3d(registration.getFinalTransformation().cast<double>())));
-
-  // Clear and forward align
-  registration.clearTarget();
-  registration.clearSource();
-
-  registration.setInputTarget(target_pcl);
-  registration.setInputSource(source_pcl);
-  registration.align(aligned);
-
-  EXPECT_EQ(aligned.size(), source_pcl->size());
-  EXPECT_TRUE(compare_transformation(T_target_source, Eigen::Isometry3d(registration.getFinalTransformation().cast<double>())));
-}
-
 TEST(RegistrationHelperTest, VGICPRespectsMaxCorrespondenceDistance) {
   PointCloud target;
   target.resize(1);
@@ -429,4 +321,33 @@ TEST_P(RegistrationTest, RegistrationTest) {
   } else {
     EXPECT_TRUE(false) << "error: unknown factor type " << factor;
   }
+}
+
+// PCL convenience interface: align() on pcl::PointCloud
+TEST_F(RegistrationTest, PCLAlignInterface) {
+  // Default setting: GICP with the default parameters
+  const auto result_default = align(*target_pcl, *source_pcl);
+  EXPECT_TRUE(result_default.converged);
+  EXPECT_GT(result_default.num_inliers, 0);
+  EXPECT_TRUE(compare_transformation(T_target_source, result_default.T_target_source));
+
+  // Explicit setting: VGICP, and the final Hessian must be symmetric
+  RegistrationSetting setting;
+  setting.type = RegistrationSetting::VGICP;
+  setting.voxel_resolution = 1.0;
+  setting.num_neighbors = 20;
+  setting.max_correspondence_distance = 1.0;
+
+  const auto result_vgicp = align(*target_pcl, *source_pcl, Eigen::Isometry3d::Identity(), setting);
+  EXPECT_TRUE(result_vgicp.converged);
+  EXPECT_GT(result_vgicp.num_inliers, 0);
+  for (int i = 0; i < 6; i++) {
+    for (int j = i + 1; j < 6; j++) {
+      EXPECT_NEAR(result_vgicp.H(i, j), result_vgicp.H(j, i), 1e-3);
+    }
+  }
+
+  // The PCL overload must be a pure forwarder of the vector interface, so both paths must give the same result
+  const auto result_vector = align(toEigenVector(*target_pcl), toEigenVector(*source_pcl), Eigen::Isometry3d::Identity(), setting);
+  EXPECT_TRUE(result_vgicp.T_target_source.matrix().isApprox(result_vector.T_target_source.matrix(), 1e-12));
 }
