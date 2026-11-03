@@ -1,10 +1,12 @@
 # small_gicp
 
+English | [中文](README_zh.md)
+
 **small_gicp** is a header-only C++ library providing efficient and parallelized algorithms for fine point cloud registration (ICP, Point-to-Plane ICP, GICP, VGICP, etc.). It is a refined and optimized version of its predecessor, [fast_gicp](https://github.com/SMRT-AIST/fast_gicp), re-written from scratch with the following features.
 
 - **Highly Optimized** : The core registration algorithm implementation has been further optimized from fast_gicp, achieving up to **2x speed gain**.
 - **Fully parallerized** : small_gicp offers parallel implementations of several preprocessing algorithms, making the entire registration process parallelized (e.g., Downsampling, KdTree construction, Normal/Covariance estimation). It supports [OpenMP](https://www.openmp.org/) and [Intel TBB](https://github.com/oneapi-src/oneTBB) as parallelism backends.
-- **Minimum dependencies** : The library requires only [Eigen](https://eigen.tuxfamily.org/) along with the bundled [nanoflann](https://github.com/jlblancoc/nanoflann) and [Sophus](https://github.com/strasdat/Sophus). Optionally, it supports a [PCL](https://pointclouds.org/) registration interface for use as a drop-in replacement
+- **Minimum dependencies** : The library requires only [Eigen](https://eigen.tuxfamily.org/) along with the bundled [nanoflann](https://github.com/jlblancoc/nanoflann) and [Sophus](https://github.com/strasdat/Sophus). Optionally, it supports a [PCL](https://pointclouds.org/) interface that accepts `pcl::PointCloud` directly and is not tied to a specific PCL version
 - **Customizable** : small_gicp allows the integration of any custom point cloud class into the registration algorithm via traits. Its template-based implementation enables customization of the registration process with original correspondence estimators and registration factors.
 - **Python bindings** : By being isolated from PCL, small_gicp's Python bindings are more portable and can be used seamlessly with other libraries such as Open3D.
 
@@ -15,9 +17,90 @@ If you find this package useful for your project, please consider leaving a comm
 
 [![status](https://joss.theoj.org/papers/059b017c823ed9fd211fc91373cdc2cc/status.svg)](https://joss.theoj.org/papers/059b017c823ed9fd211fc91373cdc2cc) [![Build(Linux)](https://github.com/koide3/small_gicp/actions/workflows/build-linux.yml/badge.svg)](https://github.com/koide3/small_gicp/actions/workflows/build-linux.yml) [![macos](https://github.com/koide3/small_gicp/actions/workflows/build-macos.yml/badge.svg)](https://github.com/koide3/small_gicp/actions/workflows/build-macos.yml) [![Build(Windows)](https://github.com/koide3/small_gicp/actions/workflows/build-windows.yml/badge.svg)](https://github.com/koide3/small_gicp/actions/workflows/build-windows.yml) [![Test](https://github.com/koide3/small_gicp/actions/workflows/test.yml/badge.svg)](https://github.com/koide3/small_gicp/actions/workflows/test.yml) [![codecov](https://codecov.io/gh/koide3/small_gicp/graph/badge.svg?token=PCVIUP2Z33)](https://codecov.io/gh/koide3/small_gicp)
 
+## Changes from the upstream project
+
+This repository is a fork of [small_gicp](https://github.com/koide3/small_gicp). On top of the upstream features, it contains the following changes.
+
+### PCL version independence
+
+- The PCL interface no longer depends on the PCL version. The `pcl::Registration`-derived wrapper (`RegistrationPCL`, `pcl/pcl_registration.hpp`) has been removed; `pcl/pcl.hpp` is the single entry header and provides the PCL point types, the traits specialization, the point cloud conversion helpers (`toEigenVector` / `fromEigenVector`), `PointCloudProxy`, and an `align()` overload that takes `pcl::PointCloud`.
+- The PCL 1.11 requirement (a `static_assert` on `pcl::shared_ptr`) has been removed, so both the `boost::shared_ptr` based (PCL 1.10) and the `std::shared_ptr` based (PCL 1.11 and later) point cloud pointers can be used.
+- Link-type keywords (`optimized`, `debug`, `general`) are stripped from `PCL_LIBRARIES` before they are written into an imported target, so `-DBUILD_WITH_PCL=ON` configures with PCL versions whose `PCLConfig.cmake` does not provide a `PCL::PCL` target.
+- The PCL example, the PCL odometry benchmark and the PCL-related tests were ported to the new interface, and a test for the `align()` overload was added.
+- Verified with PCL 1.10 (Ubuntu 20.04) and PCL 1.12.1 (Ubuntu 22.04): all tests pass on both.
+
+### Voxel-based covariance initialization
+
+- `util/voxel_covariance.hpp` provides two additional covariance estimation methods that assign one covariance to all points in a voxel: `estimate_voxel_raw_covariances[_omp]` estimates it from the points inside the voxel, and `estimate_voxel_filter_covariances[_omp]` from the nearest voxel centroids. The `_normals_covariances` variants write normals as well. Both methods are much cheaper than the per-point estimation and are parallelized over voxels.
+- `RegistrationSetting` gains `cov_init` (`POINT_KNN` by default, `VOXEL_RAW`, `VOXEL_FILTER`), `cov_voxel_size`, `cov_num_neighbors`, and `num_neighbors`; `preprocess_points(points, setting)` selects the estimator accordingly. The previous `preprocess_points(points, downsampling_resolution, num_neighbors, num_threads)` is kept as a wrapper, so its behavior does not change.
+- `src/example/05_covariance_init.cpp` shows how to select the initialization and compares the preprocessing cost and the accuracy of the methods.
+
+
+**The recommended setting is `VOXEL_FILTER`.** It keeps 0% weak constraints at every downsampling resolution and works with both VGICP and GICP, so it is a safe default for general use.
+
+| `cov_init` | How it works | Parameters | Pros | Cons |
+|---|---|---|---|---|
+| `POINT_KNN` (default) | One covariance per point from its nearest neighbors | `num_neighbors` (10), `num_threads` | The upstream behavior and no extra parameter beyond `num_neighbors`; accurate on downsampled clouds (27.9 mm at 0.10 m, 19.6 / 14.5 mm at 0.25 / 0.50 m) | The per-point nearest neighbor search dominates the preprocessing (35.6 ms of covariance estimation and 92.8 ms in total on the raw cloud, about five times `VOXEL_FILTER`); the scale follows the point density, and on the dense raw cloud the 10th neighbor is only 62 mm away, which makes its error the largest of the three (124.8 mm) |
+| `VOXEL_RAW` | One covariance per voxel from the points inside the voxel, no nearest neighbor search | `cov_voxel_size` (0.5 m), `num_threads` | The cheapest of the three (0.07-3.10 ms) and a single parameter; accurate enough on dense clouds (3.1% weak constraints on the raw cloud) | It requires at least 5 points per voxel, so the weak constraint ratio grows quickly as the cloud gets sparser (83.3% at 0.25 m, 99.8% at 0.50 m) and turns directly into a bias with GICP (42.96 mm and 452.28 mm); the voxel size therefore has to grow with the point spacing (keeping the weak ratio below 10% needs 1.5 m at 0.25 m and more than 2 m at 0.50 m), so one voxel size cannot serve clouds of different densities; a voxel may mix several surfaces, which distorts the covariance at corners |
+| `VOXEL_FILTER` | One covariance per voxel from the nearest voxel centroids, assigned to all points in the voxel | `cov_voxel_size` (0.5 m), `cov_num_neighbors` (8), `num_threads` | It is cheap (preprocessing 1.3-4.1 ms) and the better covariance means fewer iterations, so the total time is the lowest or close to the lowest; it does not fall back to the weak constraint at any point density (0% weak constraints at every downsampling resolution) | One more parameter (`cov_num_neighbors`, tuned together with `cov_voxel_size`) and a slightly higher covariance estimation cost than `VOXEL_RAW`; its accuracy depends on the voxel size (12.4 mm at 1.0 m vs. 60.8 mm at 2.0 m on the 0.25 m downsampled cloud), so `cov_voxel_size` still has to follow the downsampling resolution (41.3 mm with a 0.5 m voxel on the raw cloud), but it adapts better to different point densities than `VOXEL_RAW`, which falls back to the weak constraint once its voxels are too small |
+
+#### Experimental results
+
+Both tables are produced by `src/example/05_covariance_init.cpp` with no initial offset and 4 threads (set `downsampling_resolutions = {0.0, 0.1, 0.25, 0.5}` and `cov_voxel_sizes = {0.5, 1.0}` in `BenchmarkConfig` to reproduce them); the ground truth is a translation of 504.3 mm and a rotation of 0.716 deg. `cov[ms]` is the covariance estimation time of the target and source clouds, `reg[ms]` includes the target-side structure construction (voxelmap or kdtree), `total[ms]` is `cov[ms] + reg[ms]`, and `weak[%]` is the ratio of target points that received the weak constraint (`Identity`) instead of a valid covariance. The numbers are from a single run; the multi-threaded downsampling and reduction make them vary slightly between runs.
+
+#### VGICP
+
+| Downsampling | `cov_init` | Setting | cov[ms] | reg[ms] | total[ms] | trans[mm] | rot[deg] | weak[%] |
+|---|---|---|---|---|---|---|---|---|
+| raw (69088 / 69792) | `VOXEL_RAW` | 0.5 m | 3.10 | 18.58 | 21.68 | 24.054 | 0.243 | 3.1 |
+| raw (69088 / 69792) | `VOXEL_RAW` | 1.0 m | **2.85** | 15.46 | 18.31 | **19.182** | **0.185** | 1.1 |
+| raw (69088 / 69792) | `VOXEL_FILTER` | 0.5 m, k=8 | 4.05 | **13.08** | **17.13** | 41.338 | 0.537 | **0.0** |
+| raw (69088 / 69792) | `VOXEL_FILTER` | 1.0 m, k=8 | 3.02 | 14.21 | 17.24 | 58.599 | 0.521 | **0.0** |
+| raw (69088 / 69792) | `POINT_KNN` | k=10 | 35.59 | 57.24 | 92.83 | 124.827 | 0.292 | **0.0** |
+| 0.10 m (15828 / 16004) | `VOXEL_RAW` | 0.5 m | 0.58 | 3.26 | 3.85 | 29.188 | 0.357 | 20.2 |
+| 0.10 m (15828 / 16004) | `VOXEL_RAW` | 1.0 m | **0.56** | 3.13 | **3.69** | 14.508 | **0.168** | 6.0 |
+| 0.10 m (15828 / 16004) | `VOXEL_FILTER` | 0.5 m, k=8 | 1.63 | **2.78** | 4.41 | **11.798** | 0.240 | **0.0** |
+| 0.10 m (15828 / 16004) | `VOXEL_FILTER` | 1.0 m, k=8 | 0.80 | 3.84 | 4.65 | 13.825 | 0.294 | **0.0** |
+| 0.10 m (15828 / 16004) | `POINT_KNN` | k=10 | 7.90 | 3.69 | 11.59 | 27.945 | 0.661 | **0.0** |
+| 0.25 m (6206 / 6230) | `VOXEL_RAW` | 0.5 m | **0.20** | 4.07 | 4.27 | 24.336 | 0.559 | 83.3 |
+| 0.25 m (6206 / 6230) | `VOXEL_RAW` | 1.0 m | 0.26 | **1.18** | **1.44** | **11.767** | **0.104** | 21.6 |
+| 0.25 m (6206 / 6230) | `VOXEL_FILTER` | 0.5 m, k=8 | 1.42 | 1.29 | 2.71 | 15.572 | 0.195 | **0.0** |
+| 0.25 m (6206 / 6230) | `VOXEL_FILTER` | 1.0 m, k=8 | 0.60 | 1.40 | 2.00 | 12.436 | 0.290 | **0.0** |
+| 0.25 m (6206 / 6230) | `POINT_KNN` | k=10 | 3.04 | 1.33 | 4.37 | 19.602 | 0.378 | **0.0** |
+| 0.50 m (2747 / 2721) | `VOXEL_RAW` | 0.5 m | **0.07** | 1.91 | 1.98 | 23.254 | 0.490 | 99.8 |
+| 0.50 m (2747 / 2721) | `VOXEL_RAW` | 1.0 m | 0.11 | 0.85 | **0.96** | 292.557 | 1.012 | 72.8 |
+| 0.50 m (2747 / 2721) | `VOXEL_FILTER` | 0.5 m, k=8 | 1.30 | 0.66 | 1.96 | 22.093 | **0.218** | **0.0** |
+| 0.50 m (2747 / 2721) | `VOXEL_FILTER` | 1.0 m, k=8 | 0.52 | 0.81 | 1.33 | 25.795 | 0.369 | **0.0** |
+| 0.50 m (2747 / 2721) | `POINT_KNN` | k=10 | 1.31 | **0.64** | 1.95 | **20.529** | 0.241 | **0.0** |
+
+#### GICP
+
+| Downsampling | `cov_init` | Setting | cov[ms] | reg[ms] | total[ms] | trans[mm] | rot[deg] | weak[%] |
+|---|---|---|---|---|---|---|---|---|
+| raw (69088 / 69792) | `VOXEL_RAW` | 0.5 m | 2.89 | 91.81 | 94.71 | 290.555 | 1.121 | 3.1 |
+| raw (69088 / 69792) | `VOXEL_RAW` | 1.0 m | **2.83** | 60.09 | 62.92 | 283.008 | 0.949 | 1.1 |
+| raw (69088 / 69792) | `VOXEL_FILTER` | 0.5 m, k=8 | 4.07 | **57.68** | **61.74** | **34.404** | **0.499** | **0.0** |
+| raw (69088 / 69792) | `VOXEL_FILTER` | 1.0 m, k=8 | 3.19 | 79.63 | 82.82 | 54.374 | 0.526 | **0.0** |
+| raw (69088 / 69792) | `POINT_KNN` | k=10 | 35.95 | 107.85 | 143.80 | 417.316 | 0.629 | **0.0** |
+| 0.10 m (15828 / 16004) | `VOXEL_RAW` | 0.5 m | 0.57 | **5.20** | **5.77** | 3.308 | 0.153 | 20.2 |
+| 0.10 m (15828 / 16004) | `VOXEL_RAW` | 1.0 m | **0.56** | 5.23 | 5.79 | 7.208 | 0.054 | 6.0 |
+| 0.10 m (15828 / 16004) | `VOXEL_FILTER` | 0.5 m, k=8 | 1.63 | 5.26 | 6.89 | 4.530 | 0.398 | **0.0** |
+| 0.10 m (15828 / 16004) | `VOXEL_FILTER` | 1.0 m, k=8 | 0.78 | 6.27 | 7.05 | 22.258 | 0.202 | **0.0** |
+| 0.10 m (15828 / 16004) | `POINT_KNN` | k=10 | 7.94 | 6.35 | 14.29 | **0.001** | **0.000** | **0.0** |
+| 0.25 m (6206 / 6230) | `VOXEL_RAW` | 0.5 m | **0.20** | 2.21 | 2.41 | 42.956 | 0.255 | 83.3 |
+| 0.25 m (6206 / 6230) | `VOXEL_RAW` | 1.0 m | 0.26 | 1.83 | **2.09** | 11.957 | **0.140** | 21.6 |
+| 0.25 m (6206 / 6230) | `VOXEL_FILTER` | 0.5 m, k=8 | 1.43 | 2.21 | 3.64 | 7.978 | 0.492 | **0.0** |
+| 0.25 m (6206 / 6230) | `VOXEL_FILTER` | 1.0 m, k=8 | 0.61 | 2.21 | 2.82 | 22.463 | 0.312 | **0.0** |
+| 0.25 m (6206 / 6230) | `POINT_KNN` | k=10 | 3.08 | **1.51** | 4.60 | **6.867** | 0.332 | **0.0** |
+| 0.50 m (2747 / 2721) | `VOXEL_RAW` | 0.5 m | **0.07** | 1.14 | 1.21 | 452.276 | 0.892 | 99.8 |
+| 0.50 m (2747 / 2721) | `VOXEL_RAW` | 1.0 m | 0.11 | 0.97 | **1.08** | 354.854 | 0.861 | 72.8 |
+| 0.50 m (2747 / 2721) | `VOXEL_FILTER` | 0.5 m, k=8 | 1.27 | 1.47 | 2.74 | **9.822** | 0.700 | **0.0** |
+| 0.50 m (2747 / 2721) | `VOXEL_FILTER` | 1.0 m, k=8 | 0.52 | 0.97 | 1.50 | 25.148 | 0.373 | **0.0** |
+| 0.50 m (2747 / 2721) | `POINT_KNN` | k=10 | 1.31 | **0.96** | 2.27 | 10.087 | **0.278** | **0.0** |
+
 ## Requirements
 
-This library uses C++17 features. The PCL interface is not compatible with PCL older than 1.11 that uses `boost::shared_ptr`.
+This library uses C++17 features. The PCL interface no longer has a PCL version restriction: it works with any PCL version as long as the point cloud interfaces it relies on do not change significantly. It has been verified with PCL 1.10 and PCL 1.12.1.
 
 ## Dependencies
 
@@ -129,54 +212,45 @@ Eigen::Matrix<double, 6, 6> H = result.H;      // Final Hessian matrix (6x6)
 
 ### Using PCL interface ([02_basic_registration_pcl.cpp](src/example/02_basic_registration_pcl.cpp))
 
-The PCL interface allows using small_gicp as a drop-in replacement for `pcl::Registration`. It is also possible to directly feed `pcl::PointCloud` to algorithms implemented in small_gicp.
+The PCL interface is provided by a single header, `small_gicp/pcl/pcl.hpp`. It does not depend on a specific PCL version and works with any PCL version unless the point cloud interfaces change significantly. It provides the PCL point types, the traits specialization, the conversion helpers, and an `align()` overload that takes `pcl::PointCloud`. Note that this fork does not provide a `pcl::Registration`-derived wrapper; use the interfaces below instead.
 
 <details><summary>Expand</summary>
 
+`small_gicp::align` accepts `pcl::PointCloud` directly. The point clouds are downsampled and their normals and covariances are estimated internally according to the given setting.
+
 ```cpp
-#include <small_gicp/pcl/pcl_registration.hpp>
+#include <small_gicp/pcl/pcl.hpp>
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr raw_target = ...;
-pcl::PointCloud<pcl::PointXYZ>::Ptr raw_source = ...;
+pcl::PointCloud<pcl::PointXYZ> target = ...;
+pcl::PointCloud<pcl::PointXYZ> source = ...;
 
-// small_gicp::voxelgrid_downsampling can directly operate on pcl::PointCloud.
-pcl::PointCloud<pcl::PointXYZ>::Ptr target = voxelgrid_sampling_omp(*raw_target, 0.25);
-pcl::PointCloud<pcl::PointXYZ>::Ptr source = voxelgrid_sampling_omp(*raw_source, 0.25);
+// Default setting (GICP, downsampling 0.25 m, 10 neighbors, 4 threads)
+RegistrationResult result = align(target, source);
+Eigen::Isometry3d T = result.T_target_source;  // Estimated transformation
 
-// RegistrationPCL is derived from pcl::Registration and has mostly the same interface as pcl::GeneralizedIterativeClosestPoint.
-RegistrationPCL<pcl::PointXYZ, pcl::PointXYZ> reg;
-reg.setNumThreads(4);
-reg.setCorrespondenceRandomness(20);
-reg.setMaxCorrespondenceDistance(1.0);
-reg.setVoxelResolution(1.0);
-reg.setRegistrationType("VGICP");  // or "GICP" (default = "GICP")
+// Explicit setting (e.g., VGICP with a voxel resolution of 1.0 m)
+RegistrationSetting setting;
+setting.type = RegistrationSetting::VGICP;
+setting.voxel_resolution = 1.0;
+setting.downsampling_resolution = 0.25;
+setting.num_neighbors = 20;
+setting.num_threads = 4;
+setting.max_correspondence_distance = 1.0;
 
-// Set input point clouds.
-reg.setInputTarget(target);
-reg.setInputSource(source);
-
-// Align point clouds.
-auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-reg.align(*aligned);
-
-// Swap source and target and align again.
-// This is useful when you want to re-use preprocessed point clouds for successive registrations (e.g., odometry estimation).
-reg.swapSourceAndTarget();
-reg.align(*aligned);
+result = align(target, source, Eigen::Isometry3d::Identity(), setting);
 ```
 
-It is also possible to directly feed `pcl::PointCloud` to `small_gicp::Registration`. Because all preprocessed data are exposed in this way, you can easily re-use them to obtain the best efficiency.
+It is also possible to feed `pcl::PointCloud` to `small_gicp::Registration`. All preprocessed data are exposed in this way, so you can easily re-use them to obtain the best efficiency.
 
 ```cpp
-#include <small_gicp/pcl/pcl_point.hpp>
-#include <small_gicp/pcl/pcl_point_traits.hpp>
+#include <small_gicp/pcl/pcl.hpp>
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr raw_target = ...;
-pcl::PointCloud<pcl::PointXYZ>::Ptr raw_source = ...;
+pcl::PointCloud<pcl::PointXYZ> raw_target = ...;
+pcl::PointCloud<pcl::PointXYZ> raw_source = ...;
 
 // Downsample points and convert them into pcl::PointCloud<pcl::PointCovariance>.
-pcl::PointCloud<pcl::PointCovariance>::Ptr target = voxelgrid_sampling_omp<pcl::PointCloud<pcl::PointXYZ>, pcl::PointCloud<pcl::PointCovariance>>(*raw_target, 0.25);
-pcl::PointCloud<pcl::PointCovariance>::Ptr source = voxelgrid_sampling_omp<pcl::PointCloud<pcl::PointXYZ>, pcl::PointCloud<pcl::PointCovariance>>(*raw_source, 0.25);
+auto target = voxelgrid_sampling_omp<pcl::PointCloud<pcl::PointXYZ>, pcl::PointCloud<pcl::PointCovariance>>(raw_target, 0.25);
+auto source = voxelgrid_sampling_omp<pcl::PointCloud<pcl::PointXYZ>, pcl::PointCloud<pcl::PointCovariance>>(raw_source, 0.25);
 
 // Estimate covariances of points.
 const int num_threads = 4;
@@ -194,6 +268,14 @@ registration.rejector.max_dist_sq = 1.0;
 
 // Align point clouds. Note that the input point clouds are pcl::PointCloud<pcl::PointCovariance>.
 auto result = registration.align(*target, *source, *target_tree, Eigen::Isometry3d::Identity());
+```
+
+The conversion helpers are available when the point clouds have to be passed to the algorithms that accept only `std::vector<Eigen::Vector(3|4)(f|d)>`.
+
+```cpp
+// pcl::PointCloud -> std::vector<Eigen::Vector4d>, and back
+std::vector<Eigen::Vector4d> points = toEigenVector(raw_target);
+fromEigenVector(points, raw_target);
 ```
 
 </details>
@@ -417,6 +499,8 @@ cd ..
 ./build/01_basic_registration
 ./build/02_basic_registration_pcl
 ./build/03_registration_template
+./build/04_colored_icp
+./build/05_covariance_init
 ```
 
 
@@ -432,7 +516,6 @@ python3 src/example/basic_registration.py
 ## [Benchmark](BENCHMARK.md)
 
 Processing speed comparison between small_gicp and Open3D ([youtube](https://youtu.be/LNESzGXPr4c?feature=shared)).
-[![small_comp](https://github.com/koide3/small_gicp/assets/31344317/7959edd6-f0e4-4318-b4c1-a3f8755c407f)](https://youtu.be/LNESzGXPr4c?feature=shared)
 
 ### Downsampling
 
