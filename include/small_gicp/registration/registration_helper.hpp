@@ -43,10 +43,20 @@ struct RegistrationSetting {
     COLORED_ICP  ///< Colored ICP (requires colors, normals, and color gradients on the point clouds)
   };
 
+  /// @brief Covariance estimation method
+  enum CovInit {
+    POINT_KNN,    ///< Estimate the covariance of each point from its nearest neighbors (default)
+    VOXEL_RAW,    ///< Estimate one covariance per voxel from the points inside the voxel
+    VOXEL_FILTER  ///< Estimate one covariance per voxel from the nearest voxel centroids
+  };
+
   RegistrationType type = GICP;              ///< Registration type
   double voxel_resolution = 1.0;             ///< Voxel resolution for VGICP
   double downsampling_resolution = 0.25;     ///< Downsample resolution (this will be used only in the Eigen-based interface)
   int num_neighbors = 10;                    ///< Number of neighbors for normal and covariance estimation
+  CovInit cov_init = POINT_KNN;              ///< Covariance estimation method
+  double cov_voxel_size = 0.5;               ///< Voxel size for VOXEL_RAW and VOXEL_FILTER
+  int cov_num_neighbors = 8;                 ///< Number of neighboring voxels for VOXEL_FILTER
   double max_correspondence_distance = 1.0;  ///< Maximum correspondence distance
   double rotation_eps = 0.1 * M_PI / 180.0;  ///< Rotation tolerance for convergence check [rad]
   double translation_eps = 1e-3;             ///< Translation tolerance for convergence check
@@ -54,6 +64,13 @@ struct RegistrationSetting {
   int max_iterations = 20;                   ///< Maximum number of iterations
   bool verbose = false;                      ///< Verbose mode
 };
+
+/// @brief Preprocess point cloud (downsampling, kdtree creation, and normal and covariance estimation)
+/// @note  The covariance estimation method is selected by RegistrationSetting::cov_init.
+/// @param points  Input points
+/// @param setting Registration setting
+std::pair<PointCloud::Ptr, std::shared_ptr<KdTree<PointCloud>>>
+preprocess_points(const PointCloud& points, const RegistrationSetting& setting);
 
 /// @brief Align point clouds
 /// @note This function only accepts Eigen::Vector(3|4)(f|d) as input

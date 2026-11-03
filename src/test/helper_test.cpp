@@ -89,6 +89,65 @@ TEST_F(HelperTest, GaussianVoxelMap) {
   EXPECT_LT(voxelmap->size(), target_raw->size());
 }
 
+// Voxel-based covariance initialization must give the same registration result as the per-point one
+TEST_F(HelperTest, CovInitVoxel) {
+  for (const auto cov_init : {RegistrationSetting::VOXEL_RAW, RegistrationSetting::VOXEL_FILTER}) {
+    RegistrationSetting setting;
+    setting.type = RegistrationSetting::GICP;
+    setting.cov_init = cov_init;
+    setting.downsampling_resolution = 0.1;
+    setting.num_threads = 1;
+
+    auto [target, target_tree] = preprocess_points(*target_raw, setting);
+    auto [source, source_tree] = preprocess_points(*source_raw, setting);
+
+    const auto result = align(*target, *source, *target_tree, Eigen::Isometry3d::Identity(), setting);
+    EXPECT_TRUE(compare_transformation(T_target_source, result.T_target_source));
+  }
+}
+
+// PLANE_ICP consumes normals, so the voxel-based estimation must provide them
+TEST_F(HelperTest, CovInitVoxelWithNormals) {
+  for (const auto cov_init : {RegistrationSetting::VOXEL_RAW, RegistrationSetting::VOXEL_FILTER}) {
+    RegistrationSetting setting;
+    setting.type = RegistrationSetting::PLANE_ICP;
+    setting.cov_init = cov_init;
+    setting.downsampling_resolution = 0.1;
+    setting.num_threads = 1;
+
+    auto [target, target_tree] = preprocess_points(*target_raw, setting);
+    size_t num_valid_normals = 0;
+    for (size_t i = 0; i < target->size(); i++) {
+      if (target->normal(i).norm() > 0.5) {
+        num_valid_normals++;
+      }
+    }
+    EXPECT_GT(num_valid_normals, target->size() / 2);
+
+    auto [source, source_tree] = preprocess_points(*source_raw, setting);
+    const auto result = align(*target, *source, *target_tree, Eigen::Isometry3d::Identity(), setting);
+    EXPECT_TRUE(compare_transformation(T_target_source, result.T_target_source));
+  }
+}
+
+// The setting-based preprocessing must be equivalent to the explicit arguments (default = per-point estimation)
+TEST_F(HelperTest, PreprocessWithSetting) {
+  RegistrationSetting setting;
+  setting.downsampling_resolution = 0.1;
+  setting.num_neighbors = 10;
+  setting.num_threads = 1;
+
+  auto [target_a, tree_a] = preprocess_points(*target_raw, 0.1, 10, 1);
+  auto [target_b, tree_b] = preprocess_points(*target_raw, setting);
+
+  ASSERT_EQ(target_a->size(), target_b->size());
+  for (size_t i = 0; i < target_a->size(); i++) {
+    EXPECT_LT((target_a->point(i) - target_b->point(i)).norm(), 1e-12);
+    EXPECT_LT((target_a->normal(i) - target_b->normal(i)).norm(), 1e-12);
+    EXPECT_LT((target_a->cov(i) - target_b->cov(i)).norm(), 1e-12);
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(HelperTest, HelperTest, testing::Values("ICP", "PLANE_ICP", "GICP", "VGICP"), [](const auto& info) { return info.param; });
 
 TEST_P(HelperTest, AlignEigen) {

@@ -9,6 +9,7 @@
 #include <small_gicp/util/downsampling_omp.hpp>
 #include <small_gicp/util/normal_estimation.hpp>
 #include <small_gicp/util/normal_estimation_omp.hpp>
+#include <small_gicp/util/voxel_covariance.hpp>
 
 #include <small_gicp/factors/icp_factor.hpp>
 #include <small_gicp/factors/plane_icp_factor.hpp>
@@ -22,18 +23,64 @@
 namespace small_gicp {
 
 // Preprocess points
-std::pair<PointCloud::Ptr, std::shared_ptr<KdTree<PointCloud>>> preprocess_points(const PointCloud& points, double downsampling_resolution, int num_neighbors, int num_threads) {
-  if (num_threads == 1) {
-    auto downsampled = voxelgrid_sampling(points, downsampling_resolution);
-    auto kdtree = std::make_shared<KdTree<PointCloud>>(downsampled);
-    estimate_normals_covariances(*downsampled, *kdtree, num_neighbors);
-    return {downsampled, kdtree};
+std::pair<PointCloud::Ptr, std::shared_ptr<KdTree<PointCloud>>> preprocess_points(const PointCloud& points, const RegistrationSetting& setting) {
+  PointCloud::Ptr downsampled;
+  if (setting.num_threads == 1) {
+    downsampled = voxelgrid_sampling(points, setting.downsampling_resolution);
   } else {
-    auto downsampled = voxelgrid_sampling_omp(points, downsampling_resolution);
-    auto kdtree = std::make_shared<KdTree<PointCloud>>(downsampled);
-    estimate_normals_covariances_omp(*downsampled, *kdtree, num_neighbors, num_threads);
-    return {downsampled, kdtree};
+    downsampled = voxelgrid_sampling_omp(points, setting.downsampling_resolution, setting.num_threads);
   }
+  auto kdtree = std::make_shared<KdTree<PointCloud>>(downsampled);
+
+  // PLANE_ICP and COLORED_ICP consume normals, the other registration types only consume covariances
+  const bool with_normals = setting.type == RegistrationSetting::PLANE_ICP || setting.type == RegistrationSetting::COLORED_ICP;
+  const bool single_thread = setting.num_threads == 1;
+
+  switch (setting.cov_init) {
+    default:
+      std::cerr << "invalid covariance initialization" << std::endl;
+      abort();
+    case RegistrationSetting::POINT_KNN:
+      if (single_thread) {
+        estimate_normals_covariances(*downsampled, *kdtree, setting.num_neighbors);
+      } else {
+        estimate_normals_covariances_omp(*downsampled, *kdtree, setting.num_neighbors, setting.num_threads);
+      }
+      break;
+    case RegistrationSetting::VOXEL_RAW:
+      if (with_normals && !single_thread) {
+        estimate_voxel_raw_normals_covariances_omp(*downsampled, setting.cov_voxel_size, setting.num_threads);
+      } else if (with_normals) {
+        estimate_voxel_raw_normals_covariances(*downsampled, setting.cov_voxel_size);
+      } else if (!single_thread) {
+        estimate_voxel_raw_covariances_omp(*downsampled, setting.cov_voxel_size, setting.num_threads);
+      } else {
+        estimate_voxel_raw_covariances(*downsampled, setting.cov_voxel_size);
+      }
+      break;
+    case RegistrationSetting::VOXEL_FILTER:
+      if (with_normals && !single_thread) {
+        estimate_voxel_filter_normals_covariances_omp(*downsampled, setting.cov_voxel_size, setting.cov_num_neighbors, setting.num_threads);
+      } else if (with_normals) {
+        estimate_voxel_filter_normals_covariances(*downsampled, setting.cov_voxel_size, setting.cov_num_neighbors);
+      } else if (!single_thread) {
+        estimate_voxel_filter_covariances_omp(*downsampled, setting.cov_voxel_size, setting.cov_num_neighbors, setting.num_threads);
+      } else {
+        estimate_voxel_filter_covariances(*downsampled, setting.cov_voxel_size, setting.cov_num_neighbors);
+      }
+      break;
+  }
+
+  return {downsampled, kdtree};
+}
+
+// Preprocess points with the per-point covariance estimation
+std::pair<PointCloud::Ptr, std::shared_ptr<KdTree<PointCloud>>> preprocess_points(const PointCloud& points, double downsampling_resolution, int num_neighbors, int num_threads) {
+  RegistrationSetting setting;
+  setting.downsampling_resolution = downsampling_resolution;
+  setting.num_neighbors = num_neighbors;
+  setting.num_threads = num_threads;
+  return preprocess_points(points, setting);
 }
 
 // Preprocess points with Eigen input
@@ -65,8 +112,8 @@ align(const std::vector<Eigen::Matrix<T, D, 1>>& target, const std::vector<Eigen
     return RegistrationResult(Eigen::Isometry3d::Identity());
   }
 
-  auto [target_points, target_tree] = preprocess_points(*std::make_shared<PointCloud>(target), setting.downsampling_resolution, setting.num_neighbors, setting.num_threads);
-  auto [source_points, source_tree] = preprocess_points(*std::make_shared<PointCloud>(source), setting.downsampling_resolution, setting.num_neighbors, setting.num_threads);
+  auto [target_points, target_tree] = preprocess_points(*std::make_shared<PointCloud>(target), setting);
+  auto [source_points, source_tree] = preprocess_points(*std::make_shared<PointCloud>(source), setting);
 
   if (setting.type == RegistrationSetting::VGICP) {
     auto target_voxelmap = create_gaussian_voxelmap(*target_points, setting.voxel_resolution);
